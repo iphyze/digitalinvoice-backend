@@ -183,6 +183,7 @@ $routes = [
     'GET /platform/settings' => 'routes/platform/settings.php',
     'PUT /platform/settings' => 'routes/platform/settings.php',
     'POST /platform/firs-sandbox-health' => 'routes/platform/firsHealthCheck.php',
+    'POST /platform/firs-resources/sync' => 'routes/platform/firsResourceSync.php',
     'GET /platform/firs-integration' => 'routes/platform/firsIntegration.php',
     'PUT /platform/firs-integration' => 'routes/platform/firsIntegration.php',
     'GET /platform/firs-resources' => 'routes/platform/firsResources.php',
@@ -217,6 +218,7 @@ $routes = [
     'GET /firs/classification-codes' => 'routes/firs/classificationCodes.php',
     'GET /firs/submission-queue' => 'routes/firs/submissionQueue.php',
     'POST /firs/invoice-readiness' => 'routes/firs/invoiceReadiness.php',
+    'POST /firs/sandbox-invoice-validate' => 'routes/firs/sandboxInvoiceValidate.php',
     'POST /firs/credit-note-readiness' => 'routes/firs/creditNoteReadiness.php',
 
     'GET /team/roles' => 'routes/team/roles.php',

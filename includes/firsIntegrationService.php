@@ -8,6 +8,8 @@ require_once __DIR__ . '/platformService.php';
 require_once __DIR__ . '/fieldEncryption.php';
 require_once __DIR__ . '/firsReadinessChecks.php';
 require_once __DIR__ . '/firsUblAdapter.php';
+require_once __DIR__ . '/nrsCompliancePreflight.php';
+require_once __DIR__ . '/nrsSigningReadiness.php';
 require_once __DIR__ . '/creditNoteService.php';
 
 function firsDefaultResourceCatalogue(): array
@@ -47,6 +49,21 @@ function firsDefaultResourceCatalogue(): array
             'label' => 'VAT exemptions',
             'endpoint' => '/api/v1/invoice/resources/vat-exemptions',
             'description' => 'Recognized VAT exemption categories and codes for non-standard VAT treatments.',
+        ],
+        'quantity_codes' => [
+            'label' => 'Official invoice quantity codes',
+            'endpoint' => '/api/v1/invoice/resources/invoice-quantity-codes',
+            'description' => 'UN/ECE unit codes from an authenticated NRS sandbox response.',
+        ],
+        'states' => [
+            'label' => 'NRS state codes',
+            'endpoint' => '/api/v1/invoice/resources/states',
+            'description' => 'Official state codes from the NRS sandbox resource endpoint.',
+        ],
+        'lgas' => [
+            'label' => 'NRS local government codes',
+            'endpoint' => '/api/v1/invoice/resources/lgas',
+            'description' => 'Official LGA codes from the NRS sandbox resource endpoint.',
         ],
         'unit_codes' => [
             'label' => 'Unit codes',
@@ -223,6 +240,15 @@ function firsResourceOptions(mysqli $conn): array
                 ];
             }, $units->fetch_all(MYSQLI_ASSOC));
             $units->free();
+        }
+    }
+    // Prefer the authenticated NRS invoice-quantity-codes list for price_unit.
+    // Unverified local units remain a separate fallback, never reported as NRS-issued.
+    foreach ($resources as $resource) {
+        if ($resource['key'] === 'quantity_codes' && $resource['status'] === 'synced'
+            && !empty($options['quantity_codes'])) {
+            $options['unit_codes'] = $options['quantity_codes'];
+            break;
         }
     }
     return $options;
@@ -651,6 +677,7 @@ function firsPrepareInvoice(mysqli $conn, array $user, int $invoiceId): array
     $checks = firsPayloadChecks($payload);
     $ubl = firsUblPayload($payload, ['business_id' => $payload['nrs_business_id'] ?? null, 'irn' => $payload['nrs_irn'] ?? null]);
     $ublChecks = firsUblValidate($ubl, $payload);
+    $officialCodes = nrsOfficialCodePreflight($ubl, firsFetchResourceCatalogue($conn));
     $readinessStatus = count($checks['errors']) === 0 && $ublChecks['schema_valid'] ? 'ready' : 'blocked';
     $externalStatus = 'not_submitted';
     $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -686,7 +713,13 @@ function firsPrepareInvoice(mysqli $conn, array $user, int $invoiceId): array
     $update->execute();
     $update->close();
 
-    firsLogEvent($conn, $organizationId, $invoiceId, 'local_readiness_check', 'internal', 'POST', null, $payload, ['errors' => $allErrors, 'warnings' => $allWarnings], null, $readinessStatus, 'Local FIRS/MBS UBL readiness check completed; no external API request.');
+    // Audit metadata only. Avoid duplicating buyer names, addresses, tax IDs,
+    // and entire invoice payloads in the long-lived integration log.
+    $payloadDigest = hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+    firsLogEvent($conn, $organizationId, $invoiceId, 'local_readiness_check', 'internal', 'POST', null,
+        ['invoice_id' => $invoiceId, 'request_sha256' => $payloadDigest],
+        ['error_count' => count($allErrors), 'warning_count' => count($allWarnings)],
+        null, $readinessStatus, 'Local UBL readiness check completed; no external API request.');
     auditLog($conn, $userId, 'firs.invoice_prepared', 'Invoice prepared for future FIRS/MBS submission.', $organizationId, json_encode(['invoice_id' => $invoiceId, 'readiness_status' => $readinessStatus], JSON_UNESCAPED_SLASHES));
 
     return [
@@ -696,6 +729,7 @@ function firsPrepareInvoice(mysqli $conn, array $user, int $invoiceId): array
         'payload' => $payload,
         'ubl_payload' => $ubl,
         'ubl_validation' => $ublChecks,
+        'official_code_preflight' => $officialCodes,
         'errors' => $allErrors,
         'warnings' => $allWarnings,
         'checks' => $checks['checks'],
@@ -914,9 +948,22 @@ function firsPlatformOverview(mysqli $conn): array
         . 'ORDER BY l.id DESC LIMIT 10'
     );
 
+    // Display explicit, fail-closed assurance status. The GUI cannot certify
+    // NRS onboarding, JAdES signatures or access to a production sender.
+    $signing = nrsSigningReadiness(null);
+    $maskedProduction = $settings['settings'];
+    $maskedProduction['firs_api_key'] = !empty($settings['sensitive']['firs_api_key']) ? 'present' : '';
+    $maskedProduction['firs_secret_key'] = !empty($settings['sensitive']['firs_secret_key']) ? 'present' : '';
+    $activation = nrsProductionActivationReview($maskedProduction, [
+        'NRS_PRODUCTION_AUTHORIZED' => (string) (config('NRS_PRODUCTION_AUTHORIZED') ?? ''),
+        'NRS_PRODUCTION_LICENSE_REFERENCE' => (string) (config('NRS_PRODUCTION_LICENSE_REFERENCE') ?? ''),
+        'NRS_PRODUCTION_BASE_URL' => (string) (config('NRS_PRODUCTION_BASE_URL') ?? ''),
+    ], $signing, ['passed' => false]);
+
     return [
         'settings' => $settings,
         'summary' => $summary,
+        'assurance' => ['signing' => $signing, 'production' => $activation],
         'resources' => firsFetchResourceCatalogue($conn),
         'options' => firsComplianceOptionCatalogue(),
         'resource_options' => firsResourceOptions($conn),

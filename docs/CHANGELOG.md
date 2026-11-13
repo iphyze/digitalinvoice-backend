@@ -28,3 +28,12 @@ Two independent causes, both reproduced against the real code and fixed:
 - **Fix:** resolve `PLATFORM_ADMIN_EMAILS` directly from configuration on the public route, selecting the first valid address and falling back to `defaultSupportEmail()` in the already-loaded `includes/security.php`. Existing Premium contact email and platform owner precedence are preserved.
 - **Dependency audit:** checked `includes/platformService.php`, `utils/emailTemplates.php`, `utils/mailer.php`, and `includes/premiumRequestService.php` against their imports and the API router bootstrap. No other missing function dependency was identified; no changes were necessary in those files.
 - **Verification:** PHP syntax check and isolated contact-email resolution tests passed. End-to-end `GET /plans` was not run because the supplied archive excludes Composer vendor dependencies and live database configuration. Frontend changes require the frontend source archive, which was not supplied.
+
+## 2026-11-13 — NRS v1.1 Phase 5: authenticated sandbox reference synchronisation and preflight
+
+- Added authenticated, allowlisted, fail-closed NRS sandbox resource synchronisation, authorised admin route and React admin Sync NRS controls. Officially synced and manually seeded local code lists are distinguished.
+- Added official-code preflight to invoice readiness and a separate approved-invoice, permission-checked sandbox `/validate` endpoint. Neither path signs, submits, clears or stores official document evidence.
+- Added ECDSA X.509 certificate inspection / signing readiness and advisory production activation controls; production HTTP remains disabled.
+- Reduced stored integration logs to request digest and aggregate validation counts rather than full invoice/customer payloads.
+- Recorded blockers for alphanumeric-only IRNs, B2G/G2B workflow, missing frozen classifications, PARTIAL payment updates, JAdES/HSM certificate lifecycle and licensed production queue.
+- Offline regression tests: see `docs/NRS-PHASE5-INTEGRATION.md`. No database migration, invoice totals, approval rules or payment arithmetic changed.

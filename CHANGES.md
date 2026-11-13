@@ -113,3 +113,7 @@ Next roadmap item: Step 5, versioned ERP integration API with OAuth 2.0 client c
 - Default blank Service units to the generic Service unit to preserve invoice/document foreign keys; default blank Service prices to 0.00.
 - Keep new custom codes out of global FIRS fallback resource options; these are not official NRS unit codes.
 - Offline source and validator tests added. No live database migration or end-to-end PHP/MySQL checks have been completed.
+
+## 2026-11-13 — NRS v1.1 controlled integration foundation
+
+Authenticated sandbox resource sync; official-code preflight and approved-invoice sandbox validation; ECDSA certificate and production-readiness checks; reduced PII in local integration audit logs. Live submission and production evidence remain disabled. Details: `docs/NRS-PHASE5-INTEGRATION.md`.
