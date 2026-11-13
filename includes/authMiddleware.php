@@ -65,7 +65,7 @@ function authenticateUser(): array
         }
 
         $stmt = $conn->prepare(
-            'SELECT u.id, u.organization_id, u.name, u.email, u.role, u.email_verified_at, u.is_active, u.auth_version, '
+            'SELECT u.id, u.organization_id, u.name, u.email, u.role, u.email_verified_at, u.is_active, u.auth_version, u.mfa_reenroll_required_at, '
             . 'u.last_login, u.created_at, u.updated_at, o.name AS organization_name, o.slug AS organization_slug, o.status AS organization_status '
             . 'FROM users u JOIN organizations o ON o.id = u.organization_id WHERE u.id = ? LIMIT 1'
         );

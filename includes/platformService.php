@@ -516,6 +516,8 @@ function platformUserPayload(array $row): array
         'status' => (string) ($row['status'] ?? 'active'),
         'is_active' => (int) ($row['is_active'] ?? 1),
         'last_login' => $row['last_login'] ?? null,
+        'mfa_enabled' => !empty($row['mfa_enabled']),
+        'mfa_reenrol_required' => !empty($row['mfa_reenrol_required']),
         'last_accessed_at' => $row['last_accessed_at'] ?? null,
         'invited_by_name' => $row['invited_by_name'] ?? null,
         'invited_at' => $row['invited_at'] ?? null,
@@ -551,9 +553,12 @@ function fetchPlatformUsers(mysqli $conn): array
     $rows = platformQueryRows(
         $conn,
         'SELECT pau.id, pau.user_id, pau.platform_role, pau.status, pau.invited_at, pau.accepted_at, pau.last_accessed_at, pau.created_at, pau.updated_at, '
-        . 'u.name, u.email, u.role AS workspace_role, u.is_active, u.last_login, inviter.name AS invited_by_name '
+        . 'u.name, u.email, u.role AS workspace_role, u.is_active, u.last_login, inviter.name AS invited_by_name, '
+        . 'IF(mfa.enabled_at IS NOT NULL AND mfa.secret_ciphertext IS NOT NULL, 1, 0) AS mfa_enabled, '
+        . 'IF(u.mfa_reenroll_required_at IS NOT NULL, 1, 0) AS mfa_reenrol_required '
         . 'FROM platform_admin_users pau '
         . 'JOIN users u ON u.id = pau.user_id '
+        . 'LEFT JOIN auth_mfa_credentials mfa ON mfa.user_id = u.id '
         . 'LEFT JOIN users inviter ON inviter.id = pau.invited_by_user_id '
         . 'WHERE pau.status <> \'removed\' '
         . 'ORDER BY FIELD(pau.platform_role, \'owner\', \'admin\', \'support\', \'billing\', \'viewer\'), u.name ASC'
@@ -1012,13 +1017,20 @@ function fetchPlatformClientDetails(mysqli $conn, int $organizationId): array
 
     $users = platformQueryRows(
         $conn,
-        "SELECT id, name, email, role, is_active, last_login, joined_at, created_at
-         FROM users
-         WHERE organization_id = ?
-         ORDER BY FIELD(role, 'owner', 'admin', 'accountant', 'invoice_officer', 'approver', 'member'), name ASC",
+        "SELECT u.id, u.name, u.email, u.role, u.is_active, u.last_login, u.joined_at, u.created_at,
+                IF(mfa.enabled_at IS NOT NULL AND mfa.secret_ciphertext IS NOT NULL, 1, 0) AS mfa_enabled,
+                IF(u.mfa_reenroll_required_at IS NOT NULL, 1, 0) AS mfa_reenrol_required
+         FROM users u
+         LEFT JOIN auth_mfa_credentials mfa ON mfa.user_id = u.id
+         WHERE u.organization_id = ?
+         ORDER BY FIELD(u.role, 'owner', 'admin', 'accountant', 'invoice_officer', 'approver', 'member'), u.name ASC",
         'i',
         [$organizationId]
     );
+    $users = array_map(static fn(array $row): array => array_merge($row, [
+        'mfa_enabled' => (bool) (int) ($row['mfa_enabled'] ?? 0),
+        'mfa_reenrol_required' => (bool) (int) ($row['mfa_reenrol_required'] ?? 0),
+    ]), $users);
 
     $subscriptions = platformQueryRows(
         $conn,
@@ -1108,6 +1120,8 @@ function fetchPlatformClientDetails(mysqli $conn, int $organizationId): array
             'role' => (string) $row['role'],
             'is_active' => (int) $row['is_active'] === 1,
             'last_login' => $row['last_login'] ?? null,
+        'mfa_enabled' => !empty($row['mfa_enabled']),
+        'mfa_reenrol_required' => !empty($row['mfa_reenrol_required']),
             'joined_at' => $row['joined_at'] ?? null,
             'created_at' => $row['created_at'] ?? null,
         ], $users),
@@ -3716,6 +3730,8 @@ function fetchPlatformProfile(mysqli $conn, array $actor): array
             'email_verified_at' => $row['email_verified_at'] ?? null,
             'is_active' => (int) ($row['is_active'] ?? 1),
             'last_login' => $row['last_login'] ?? null,
+        'mfa_enabled' => !empty($row['mfa_enabled']),
+        'mfa_reenrol_required' => !empty($row['mfa_reenrol_required']),
             'created_at' => $row['created_at'] ?? null,
             'updated_at' => $row['updated_at'] ?? null,
         ],

@@ -183,7 +183,6 @@ $routes = [
     'GET /platform/settings' => 'routes/platform/settings.php',
     'PUT /platform/settings' => 'routes/platform/settings.php',
     'POST /platform/firs-sandbox-health' => 'routes/platform/firsHealthCheck.php',
-    'POST /platform/firs-resources/sync' => 'routes/platform/firsResourceSync.php',
     'GET /platform/firs-integration' => 'routes/platform/firsIntegration.php',
     'PUT /platform/firs-integration' => 'routes/platform/firsIntegration.php',
     'GET /platform/firs-resources' => 'routes/platform/firsResources.php',
@@ -196,6 +195,8 @@ $routes = [
     'POST /platform/users' => 'routes/platform/users.php',
     'PUT /platform/users' => 'routes/platform/users.php',
     'DELETE /platform/users' => 'routes/platform/users.php',
+    'POST /platform/firs-resources/sync' => 'routes/platform/firsResourceSync.php',
+    'POST /platform/users/mfa-reset' => 'routes/platform/resetUserMfa.php',
     'GET /platform/invitations/validate' => 'routes/platform/validateInvitation.php',
     'POST /platform/invitations/accept' => 'routes/platform/acceptInvitation.php',
 

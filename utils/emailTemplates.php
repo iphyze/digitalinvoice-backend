@@ -146,6 +146,18 @@ function passwordResetEmail(string $name, string $resetUrl): string
     );
 }
 
+function adminMfaResetNoticeEmail(string $name): string
+{
+    return emailShell(
+        'An administrator reset your DigitalInvoice authenticator after an account recovery request.',
+        'Authenticator reset notice',
+        '<p style="margin:0 0 15px;color:#364d63;font-size:15px;line-height:25px;">Hello <strong>' . mailEscape($name) . '</strong>,</p>'
+        . '<p style="margin:0;color:#364d63;font-size:15px;line-height:25px;">Your DigitalInvoice authenticator and recovery codes were reset by an authorised platform administrator. All your previous sessions have been ended.</p>'
+        . emailSoftPanel('Sign in with your existing account credentials and set up a NEW authenticator to regain access. Your previous authenticator and recovery codes no longer work.', 'amber')
+        . '<p style="margin:16px 0 0;color:#364d63;font-size:14px;line-height:23px;">If you did not request account recovery, contact DigitalInvoice support immediately and change your password.</p>'
+    );
+}
+
 function passwordChangedEmail(string $name, string $loginUrl): string
 {
     return emailShell(

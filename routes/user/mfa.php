@@ -70,6 +70,10 @@ try {
             $update->execute();
             $update->close();
             $recovery = mfaCreateRecoveryCodes($conn, $userId);
+            $clearAdminReset = $conn->prepare('UPDATE users SET mfa_reenroll_required_at = NULL WHERE id = ?');
+            $clearAdminReset->bind_param('i', $userId);
+            $clearAdminReset->execute();
+            $clearAdminReset->close();
             revokeRefreshTokensForUser($conn, $userId, 'mfa_enabled');
             auditLog($conn, $userId, 'auth.mfa_enabled', 'Authenticator-based MFA enabled.', (int) $user['organization_id']);
             $conn->commit();

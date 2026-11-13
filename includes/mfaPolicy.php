@@ -30,6 +30,12 @@ function mfaPolicyStartTimestamp(): int
     return $date->getTimestamp();
 }
 
+/** Recovery initiated by the platform is always enforced immediately, even on non-privileged accounts. */
+function mfaMustEnrol(bool $resetRequired, bool $policyRequired, bool $enabled, int $deadline, int $now): bool
+{
+    return !$enabled && ($resetRequired || ($policyRequired && $now >= $deadline));
+}
+
 function mfaPolicyState(mysqli $conn, array $user): array
 {
     $roleRequired = mfaPrivilegedRole((string) ($user['role'] ?? ''));
@@ -43,14 +49,16 @@ function mfaPolicyState(mysqli $conn, array $user): array
         $platformStaff = (bool) $stmt->get_result()->fetch_row();
         $stmt->close();
     }
-    $required = configBool('MFA_REQUIRED_PRIVILEGED', true) && ($roleRequired || $platformStaff);
+    $resetRequired = !empty($user['mfa_reenroll_required_at']);
+    $required = (configBool('MFA_REQUIRED_PRIVILEGED', true) && ($roleRequired || $platformStaff)) || $resetRequired;
     $enabled = mfaEnabled($conn, (int) $user['id']);
     $graceDays = max(0, min(90, (int) config('MFA_GRACE_DAYS', '7')));
     $started = mfaPolicyStartTimestamp();
     $deadline = $started === 0 ? 0 : $started + ($graceDays * 86400);
-    $enforced = $required && !$enabled && time() >= $deadline;
+    $enforced = mfaMustEnrol($resetRequired, $required, $enabled, $deadline, time());
     return [
         'required' => $required,
+        'admin_reset_pending' => $resetRequired,
         'enabled' => $enabled,
         'enrolment_required' => $enforced,
         'grace_ends_at' => $required && $deadline > 0 ? gmdate('Y-m-d\TH:i:s\Z', $deadline) : null,
