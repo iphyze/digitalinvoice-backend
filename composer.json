@@ -1,0 +1,19 @@
+{
+  "name": "teecoms/digitalinvoice-api",
+  "description": "DigitalInvoice Nigeria API - authentication, subscriptions and payment-gated onboarding foundation.",
+  "type": "project",
+  "require": {
+    "php": ">=8.1",
+    "ext-curl": "*",
+    "ext-json": "*",
+    "ext-mysqli": "*",
+    "firebase/php-jwt": "^6.11",
+    "google/apiclient": "^2.18",
+    "phpmailer/phpmailer": "^6.10",
+    "vlucas/phpdotenv": "^5.6"
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "sort-packages": true
+  }
+}

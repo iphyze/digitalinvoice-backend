@@ -1,0 +1,22 @@
+RewriteEngine On
+
+# Preserve Bearer headers for PHP under Apache/FastCGI/cPanel configurations.
+SetEnvIf Authorization "(.+)" HTTP_AUTHORIZATION=$1
+RewriteCond %{HTTP:Authorization} ^(.+)$
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# Allow the front controller to handle API paths while leaving real files untouched.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set Referrer-Policy "no-referrer"
+</IfModule>
+
+# Backend encryption keys must never be downloadable from Apache.
+<FilesMatch "^\.env(?:\..*)?$">
+    Require all denied
+</FilesMatch>

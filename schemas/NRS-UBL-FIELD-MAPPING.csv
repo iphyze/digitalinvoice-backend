@@ -1,0 +1,28 @@
+NRS field,DigitalInvoice source,DB column,Required,Notes
+business_id,org NRS Business ID,organization_compliance_profiles.nrs_business_id,Yes,NRS-issued only; never fabricate
+irn,Invoice NRS IRN,invoices.nrs_invoice_identifier / future credit-note identifier,Yes,NRS service ID needed; no auto-generation in Step 2
+issue_date,Document date,invoices.invoice_date / credit_notes.credit_note_date,Yes,YYYY-MM-DD
+due_date,Invoice due date,invoices.due_date,Optional,Credit note uses credit note date
+invoice_type_code,Local invoice type,invoices.firs_invoice_type_code or credit_notes (381),Yes,"380 invoice, 381 credit; other types require official code map"
+invoice_kind,Transaction type,invoices.firs_transaction_type,Yes,"B2B,B2C; B2G/G2B future"
+document_currency_code,Currency,invoices.currency / credit_notes.currency,Yes,ISO 4217
+accounting_supplier_party.party_name,Company name,organizations.name/trading_name,Yes,
+accounting_supplier_party.tin,Supplier TIN,organizations.tax_identification_number,Yes,
+accounting_supplier_party.email,Business email,organizations.business_email,Yes,
+accounting_supplier_party.postal_address.*,Supplier address,organizations.address_line_1/city/country + organization_compliance_profiles.nrs_*,Yes,"NRS state/LGA codes, postal zone"
+accounting_customer_party.party_name,Buyer snapshot,invoices.customer_name_snapshot / credit_notes.customer_name_snapshot,Yes,
+accounting_customer_party.tin,Buyer tax ID,invoices.customer_tin_snapshot / credit_notes.customer_tin_snapshot,Conditional,B2C missing ID triggers warning; confirm sandbox rule
+accounting_customer_party.email,Buyer email,invoices.customer_email_snapshot / credit_notes.customer_email_snapshot,Conditional,
+accounting_customer_party.postal_address.*,Buyer address,invoices.customer_address_snapshot + customers.city/nrs_postal_zone/nrs_state_code/nrs_lga_code,Yes,Codes currently reference live customer data; later snapshot at issuance
+payment_means[].payment_means_code,Selected payment means,invoices.firs_payment_means_code,Optional,Only verified mapping provided; others require resource sync
+allowance_charge[].amount,Invoice-level discount,invoices.invoice_discount_amount / credit_notes.invoice_discount_amount,If discount,Negative allowance via charge_indicator:false
+tax_total[].tax_subtotal,Tax aggregation,invoice_items.taxable_amount/tax_amount/tax_rate_percent / credit_note_items equivalents,Yes,Aggregated by code and percent; exact kobo sums
+legal_monetary_total.line_extension_amount,Line extensions before header discount,invoice_items.gross_amount - line_discount_amount,Yes,
+legal_monetary_total.tax_exclusive_amount,Net total,invoices.net_amount / credit_notes.net_amount,Yes,
+legal_monetary_total.tax_inclusive_amount,Gross payable,invoices.total_amount / credit_notes.total_amount,Yes,
+invoice_line[].invoiced_quantity,Quantity,invoice_items.quantity / credit_note_items.quantity,Yes,
+invoice_line[].item,Item details,invoice_items.item_name_snapshot/item_description_snapshot/item_code_snapshot,Yes,
+invoice_line[].price,Unit price and UOM,invoice_items.unit_price/firs_unit_code_snapshot,Yes,UOM must match new NRS resource
+invoice_line[].hsn_code,Goods classification,invoice_items.nrs_item_classification_snapshot,Goods,Need official code mapping and product category in Step3
+invoice_line[].isic_code,Service classification,invoice_items.nrs_item_classification_snapshot,Service,Need official code mapping and service category in Step3
+billing_reference[].irn,Original invoice NRS IRN,invoices.nrs_invoice_identifier,Credit note,No invented references
