@@ -81,10 +81,9 @@ function fetchOnboardingProgress(mysqli $conn, int $organizationId): array
     return $progress ?: [];
 }
 
-function organizationOnboardingState(mysqli $conn, array $user): array
+/** Build the required-step resume state from saved onboarding_progress fields. */
+function onboardingProgressState(array $progress): array
 {
-    $organizationId = (int) $user['organization_id'];
-    $progress = fetchOnboardingProgress($conn, $organizationId);
     $stepDefinitions = [
         'business_profile' => 'business_profile_completed_at',
         'invoice_settings' => 'invoice_settings_completed_at',
@@ -92,6 +91,7 @@ function organizationOnboardingState(mysqli $conn, array $user): array
     ];
     $steps = [];
     $remaining = [];
+    $furthestCompletedStep = null;
     foreach ($stepDefinitions as $step => $column) {
         $completedAt = $progress[$column] ?? null;
         $steps[$step] = [
@@ -100,6 +100,8 @@ function organizationOnboardingState(mysqli $conn, array $user): array
         ];
         if ($completedAt === null) {
             $remaining[] = $step;
+        } else {
+            $furthestCompletedStep = $step;
         }
     }
 
@@ -110,10 +112,17 @@ function organizationOnboardingState(mysqli $conn, array $user): array
         'status' => $canAccessWorkspace ? 'completed' : 'incomplete',
         'steps' => $steps,
         'remaining_steps' => $remaining,
+        'furthest_completed_step' => $furthestCompletedStep,
+        'next_step' => $canAccessWorkspace ? null : ($remaining[0] ?? 'finish'),
         'completed_at' => $completedAt,
         'can_access_workspace' => $canAccessWorkspace,
         'next_action' => $canAccessWorkspace ? 'open_workspace' : ($remaining[0] ?? 'complete_onboarding'),
     ];
+}
+
+function organizationOnboardingState(mysqli $conn, array $user): array
+{
+    return onboardingProgressState(fetchOnboardingProgress($conn, (int) $user['organization_id']));
 }
 
 function onboardingJourneyState(mysqli $conn, array $user, array $access): array
@@ -123,6 +132,8 @@ function onboardingJourneyState(mysqli $conn, array $user, array $access): array
             'status' => 'locked_until_subscription_active',
             'steps' => [],
             'remaining_steps' => ['business_profile', 'invoice_settings', 'compliance_profile'],
+            'furthest_completed_step' => null,
+            'next_step' => null,
             'completed_at' => null,
             'can_access_workspace' => false,
             'next_action' => $access['next_action'],

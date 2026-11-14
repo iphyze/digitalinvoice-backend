@@ -27,7 +27,7 @@ function subscriptionAccessState(mysqli $conn, array $user): array
         "SELECT s.id, s.plan_id, s.status, s.starts_at, s.current_period_end, s.cancelled_at, s.provider, s.provider_subscription_code, "
         . "p.code AS plan_code, p.name AS plan_name, p.billing_interval, {$actualAmountSelect}, p.amount_kobo, {$discountSelect}, p.currency, p.features "
         . "FROM subscriptions s JOIN plans p ON p.id = s.plan_id "
-        . "WHERE s.organization_id = ? ORDER BY CASE WHEN s.status IN ('active', 'trialing', 'non_renewing') AND (s.current_period_end IS NULL OR s.current_period_end >= NOW()) THEN 0 ELSE 1 END, s.created_at DESC LIMIT 1"
+        . "WHERE s.organization_id = ? AND s.status IN ('active','trialing','non_renewing') AND (s.current_period_end IS NULL OR s.current_period_end >= NOW()) ORDER BY s.current_period_end DESC, s.created_at DESC LIMIT 1"
     );
     $stmt->bind_param('i', $organizationId);
     $stmt->execute();

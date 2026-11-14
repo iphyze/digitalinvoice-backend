@@ -44,3 +44,39 @@ Two independent causes, both reproduced against the real code and fixed:
 - **`routes/subscriptions/verify.php`:** unexpected failures now log `Verify Subscription Error [ID] reference=... <ExceptionClass>: <message> @ file:line` and return the same error ID to the user (`error_id` in the JSON), so a customer report can be matched to the exact log line.
 - **New `scripts/verify-subscription-payment.php <reference> [--dry-run] [--replay=file.json]`:** runs the same verification from the server (real Paystack call), prints each step and the full exception (class, message, file:line, trace) on failure, and activates the paid subscription when it succeeds (`--dry-run` rolls back).
 - **Note:** the supplied (local) database is missing `migrations/20261113_platform_mfa_recovery.sql` (`users.mfa_reenroll_required_at`); without it every authenticated request fails with "session invalid". Apply it on every environment.
+
+## 2026-11-14 — Fix: live subscription verification failed with "Illegal mix of collations" (MySQL 8)
+
+- **Root cause (from the live error log, error ID 27F433A1):** `mysqli_sql_exception: Illegal mix of collations (utf8mb4_0900_ai_ci,COERCIBLE) and (latin1_swedish_ci,IMPLICIT) for operation 'coalesce'` at `includes/subscriptionService.php:390` (`UPDATE subscriptions ... COALESCE(NULLIF(?, ''), provider_customer_code)`). 36 core tables (users, organizations, subscriptions, invoices, ...) were `latin1`, the newer ones `utf8mb4`; MySQL 8 sends connection values as `utf8mb4_0900_ai_ci` and refuses to mix them with `latin1` columns. MariaDB (local XAMPP) converts silently, so it only failed in production. Any query mixing old and new text could fail the same way.
+- **Fix:** `migrations/20261114_unify_utf8mb4_collation.sql` converts every table to `utf8mb4` / `utf8mb4_unicode_ci` (only where needed) and keeps the 17 JSON columns in `utf8mb4_bin`; portable (MySQL + MariaDB), no stored procedures, idempotent. `includes/connection.php` now sets `SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci` on every connection.
+- **Verified on real MySQL 8.0.46 (stock defaults) with the supplied data:** before, verification failed with the exact production error; after, new-subscription and renewal verification return 200. Migration: 66 tables unified, 17 JSON columns kept `utf8mb4_bin`, all 17 JSON CHECK constraints kept, table contents byte-identical before/after (checksums), second run changes nothing (1.2s first run). Same results on MariaDB. All backend test suites pass.
+- **Rule for future migrations:** every `CREATE TABLE` must declare `DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci` (MySQL 8 would otherwise default to `utf8mb4_0900_ai_ci`).
+
+## 2026-11-14 — Payments/onboarding brief · Task 1: subscription verification and webhook idempotency
+
+- Kept the already-deployed `migrations/20261114_unify_utf8mb4_collation.sql`, `includes/connection.php`, and `scripts/verify-subscription-payment.php` unchanged. Added backend migration rules in `AGENTS.md` and `docs/BUILD-GUIDE.md`; `tests/migration_format_unit.php` checks every existing migration for explicit InnoDB/`utf8mb4_unicode_ci` table declarations and nonportable `IF [NOT] EXISTS` DDL. All nine supplied migrations passed; no historical migration was edited.
+- `POST /subscriptions/verify` now returns the existing subscription access and onboarding state immediately when the owned payment is already `paid` (including after webhook activation), without calling Paystack again or recording a duplicate verification audit entry.
+- Pending-payment verification still requires Paystack success and the exact amount/currency. `activateInitialSubscriptionPayment()` serialises concurrent webhook/browser activations with `SELECT ... FOR UPDATE` inside its existing transaction. A Paystack outage returns HTTP 502 with a retry-oriented customer message; unexpected failures retain their logged error IDs.
+- `charge.success` reconciliation now skips an already-paid reference rather than entering renewal handling. Only confirmed exact-plan successful recurring payments may enter the unknown-reference reconciliation path. Signed webhook delivery hashes are row-locked so already-processed duplicates are acknowledged and failed events can be retried safely; previously successful events cannot be marked failed on a racing retry.
+- Added `tests/subscription_payment_task1_unit.php` (amount, currency, gateway-status and idempotency safeguards) and `docs/PAYMENT-VERIFY-TASK1.md` for test and live-verification instructions.
+- Offline unit and source-check suites passed. Real Paystack webhook delivery, MySQL transaction concurrency, and SMTP notifications require staging/production verification; nothing here claims live tests were run.
+
+## 2026-11-14 — Payments/onboarding brief · Task 2: Server-owned onboarding resume
+- `includes/organizationOnboardingService.php`: reused the existing `onboarding_progress` fields and added an explicit `furthest_completed_step` and `next_step` to the onboarding state. The first incomplete required step is selected from saved server markers; the optional bank account does not block final review. Completed workspaces have no resume step. Subscription-locked sessions do not bypass the existing access guard.
+- `tests/onboarding_resume_unit.php`: offline tests for new, partially completed, completed, and out-of-order progress. No schema changes, sessions, permissions, money calculations, or previous migrations were modified.
+
+
+## 2026-11-14 — Task 3: pending/failed checkout management
+
+- Added portable idempotent migration storing Paystack authorization URL, access code, checkout expiry, verification attempts, closure reason and actor-scoped rate-limit attempts.
+- Added per-organisation mutex, provider-first re-verification, safe resumable checkout, cancellation, status endpoints and scheduled pending-payment reconciliation.
+- Added platform billing payment review and verification routes; harden delayed failed webhook behaviour for previously paid subscriptions.
+- Corrected the access-state query so pending subscriptions are not represented as current. Existing activation, strict amount/currency verification and signed-webhook guards remain.
+- Offline tests/documentation in `tests/subscription_pending_checkout_task3_unit.php` and `docs/SUBSCRIPTION-PAYMENTS-TASK3.md`.
+
+### 2026-11-14 — Checkout recovery and late-charge review (follow-up)
+
+- Recognise Paystack's definitive verify 400/404 `Transaction reference not found` as `not_created`; keep 5xx/timeouts and ambiguous errors pending. All retry/check/cancel, platform reverify and cron paths share this classification.
+- Prevent reactivation of cancelled superseded checkouts when another subscription is active. Preserve the paid transaction and provider evidence, create an audited `needs_review` case, and send a deduplicated platform billing alert.
+- Add portable idempotent `20261114_subscription_duplicate_payment_review.sql` and platform billing actions for expired staff-reviewed closures, refunds recorded after Paystack processing, pro-rata credits and documented dismissals.
+- Isolate subscription checkout service with a stub-capable internal gateway seam; add a CLI database-backed integration harness and offline regression tests. No production credentials or behaviour toggles introduced.

@@ -9,6 +9,17 @@ function paystackEnabled(): bool
     return configBool('PAYSTACK_PAYMENT_ENABLED', false) && trim((string) config('PAYSTACK_SECRET_KEY', '')) !== '';
 }
 
+/** A definitive 400/404 response from Paystack for the exact reference-verification endpoint. */
+class PaystackReferenceNotFoundException extends RuntimeException {}
+
+function paystackReferenceNotFoundResponse(int $httpStatus, string $method, string $endpoint, string $message): bool
+{
+    return in_array($httpStatus, [400, 404], true)
+        && strtoupper($method) === 'GET'
+        && preg_match('~^transaction/verify/[^/?]+$~', ltrim($endpoint, '/')) === 1
+        && preg_match('/\btransaction reference not found\b/i', $message) === 1;
+}
+
 function paystackRequest(string $method, string $endpoint, ?array $payload = null): array
 {
     if (!paystackEnabled()) {
@@ -46,6 +57,9 @@ function paystackRequest(string $method, string $endpoint, ?array $payload = nul
     $decoded = json_decode($response, true);
     if (!is_array($decoded) || $status < 200 || $status >= 300 || !($decoded['status'] ?? false)) {
         $message = is_array($decoded) ? (string) ($decoded['message'] ?? 'Payment provider rejected the request.') : 'Invalid payment provider response.';
+        if (paystackReferenceNotFoundResponse($status, $method, $endpoint, $message)) {
+            throw new PaystackReferenceNotFoundException('Transaction reference not found.', 404);
+        }
         throw new Exception($message, 502);
     }
 

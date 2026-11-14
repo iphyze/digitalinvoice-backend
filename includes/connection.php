@@ -23,6 +23,10 @@ mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 try {
     $conn = new mysqli($host, $user, $password, $name, $port);
     $conn->set_charset('utf8mb4');
+    // One collation everywhere: tables use utf8mb4_unicode_ci (see migrations/20261114_unify_utf8mb4_collation.sql).
+    // MySQL 8 otherwise gives connection values utf8mb4_0900_ai_ci, which it may refuse to mix
+    // with column collations ("Illegal mix of collations"); MariaDB has no such default.
+    $conn->query("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
     // Keep MySQL's NOW()/CURRENT_TIMESTAMP in the same timezone as PHP's date()/time().
     // Session timestamps are written by both; if the database server runs in another
     // timezone (common on shared hosting: UTC), an active session looked idle for an

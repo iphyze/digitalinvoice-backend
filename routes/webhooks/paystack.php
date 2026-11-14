@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/subscriptionService.php';
+require_once __DIR__ . '/../../includes/pendingCheckoutService.php';
 require_once __DIR__ . '/../../utils/mailer.php';
 require_once __DIR__ . '/../../utils/emailTemplates.php';
 
@@ -20,25 +21,48 @@ try {
     $stmt = $conn->prepare('INSERT IGNORE INTO webhook_events (provider, event_type, event_hash, signature_verified, payload, status) VALUES (\'paystack\', ?, ?, 1, ?, \'received\')');
     $stmt->bind_param('sss', $eventType, $eventHash, $rawBody);
     $stmt->execute();
-    $wasInserted = $stmt->affected_rows > 0;
     $stmt->close();
-    if (!$wasInserted) {
-        jsonSuccess(['message' => 'Webhook already processed.']);
-    }
 
     $data = is_array($event['data'] ?? null) ? $event['data'] : [];
+    // Use the same per-organisation mutex as checkout initialize/cancel/check
+    // for known Paystack references. Do not let a checkout be superseded while
+    // its signed success webhook is activating it.
+    $checkoutMutexOrg = 0;
+    $webhookReference = subscriptionGatewayReference($data);
+    if ($webhookReference !== '') {
+        $knownCheckout = subscriptionFindByPaymentReference($conn, $webhookReference);
+        if ($knownCheckout) {
+            $checkoutMutexOrg = (int) $knownCheckout['organization_id'];
+            checkoutAcquireLock($conn, $checkoutMutexOrg);
+        }
+    }
     $results = [];
     $conn->begin_transaction();
     try {
+        // Serialize duplicate deliveries. A failed delivery may be retried,
+        // while a processed event cannot activate/renew a second time.
+        $locked = $conn->prepare("SELECT status FROM webhook_events WHERE provider = 'paystack' AND event_hash = ? LIMIT 1 FOR UPDATE");
+        $locked->bind_param('s', $eventHash);
+        $locked->execute();
+        $eventRow = $locked->get_result()->fetch_assoc();
+        $locked->close();
+        if (!$eventRow) {
+            throw new RuntimeException('Unable to lock Paystack webhook receipt.');
+        }
+        if ($eventRow['status'] === 'processed') {
+            $conn->commit();
+            jsonSuccess(['message' => 'Webhook already processed.']);
+        }
+
         $results = processPaystackSubscriptionWebhookEvent($conn, $eventType, $data);
-        $processed = $conn->prepare("UPDATE webhook_events SET status = 'processed', processed_at = NOW() WHERE event_hash = ?");
+        $processed = $conn->prepare("UPDATE webhook_events SET status = 'processed', error_message = NULL, processed_at = NOW() WHERE event_hash = ?");
         $processed->bind_param('s', $eventHash);
         $processed->execute();
         $processed->close();
         $conn->commit();
     } catch (Throwable $error) {
         $conn->rollback();
-        $failed = $conn->prepare("UPDATE webhook_events SET status = 'failed', error_message = ?, processed_at = NOW() WHERE event_hash = ?");
+        $failed = $conn->prepare("UPDATE webhook_events SET status = 'failed', error_message = ?, processed_at = NOW() WHERE event_hash = ? AND status <> 'processed'");
         $errorMessage = substr($error->getMessage(), 0, 255);
         $failed->bind_param('ss', $errorMessage, $eventHash);
         $failed->execute();
@@ -46,6 +70,15 @@ try {
         throw $error;
     }
 
+    if ($checkoutMutexOrg > 0) {
+        checkoutReleaseLock($conn, $checkoutMutexOrg);
+        $checkoutMutexOrg = 0;
+    }
+    // Send review alerts only after a committed, provider-confirmed payment.
+    foreach (($results['reviews'] ?? []) as $review) {
+        try { subscriptionNotifyDuplicatePayment($conn, (int) $review['payment_id']); }
+        catch (Throwable $mailError) { error_log('Duplicate payment notification error: ' . $mailError->getMessage()); }
+    }
     $notificationResults = [];
     $notificationBuckets = [
         'activations' => 'subscription_activated',

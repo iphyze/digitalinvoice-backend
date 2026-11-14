@@ -3,8 +3,10 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/paystack.php';
+require_once __DIR__ . '/subscriptionPaymentChecks.php';
 require_once __DIR__ . '/security.php';
 require_once __DIR__ . '/subscriptionNotificationService.php';
+require_once __DIR__ . '/subscriptionPaymentReview.php';
 
 function subscriptionGatewayDate(?string $value, ?string $fallback = null): string
 {
@@ -18,6 +20,18 @@ function subscriptionGatewayJson(array $gatewayData): string
     return json_encode($gatewayData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
 }
 
+
+function subscriptionCheckoutClosureColumnReady(mysqli $conn): bool
+{
+    static $ready = null;
+    if ($ready !== null) return $ready;
+    try {
+        $result = $conn->query("SHOW COLUMNS FROM subscription_payments LIKE 'closed_reason'");
+        $ready = $result && $result->num_rows > 0;
+        if ($result) $result->free();
+    } catch (Throwable) { $ready = false; }
+    return $ready;
+}
 
 function subscriptionProviderEmailTokenColumnReady(mysqli $conn): bool
 {
@@ -80,21 +94,6 @@ function subscriptionGatewayReference(array $data): string
     }
 
     return '';
-}
-
-function subscriptionGatewayAmountKobo(array $data): int
-{
-    foreach (['amount', 'requested_amount', 'amount_paid'] as $key) {
-        if (isset($data[$key]) && is_numeric($data[$key])) {
-            return max(0, (int) $data[$key]);
-        }
-    }
-
-    if (isset($data['transaction']['amount']) && is_numeric($data['transaction']['amount'])) {
-        return max(0, (int) $data['transaction']['amount']);
-    }
-
-    return 0;
 }
 
 function subscriptionGatewayCurrency(array $data): string
@@ -343,11 +342,12 @@ function syncExpiredSubscriptions(mysqli $conn, ?int $organizationId = null, ?in
 
 function activateInitialSubscriptionPayment(mysqli $conn, string $reference, array $gatewayData): array
 {
+    $closureSelect = subscriptionCheckoutClosureColumnReady($conn) ? 'sp.closed_reason' : 'NULL AS closed_reason';
     $stmt = $conn->prepare(
-        'SELECT sp.id AS payment_id, sp.status AS payment_status, sp.amount_kobo, sp.currency, sp.organization_id, sp.subscription_id, '
+        'SELECT sp.id AS payment_id, sp.status AS payment_status, sp.amount_kobo, sp.currency, sp.organization_id, sp.subscription_id, ' . $closureSelect . ', '
         . 's.status AS subscription_status, s.plan_id, s.current_period_end, p.billing_interval '
         . 'FROM subscription_payments sp JOIN subscriptions s ON s.id = sp.subscription_id JOIN plans p ON p.id = s.plan_id '
-        . 'WHERE sp.payment_reference = ? LIMIT 1'
+        . 'WHERE sp.payment_reference = ? LIMIT 1 FOR UPDATE'
     );
     $stmt->bind_param('s', $reference);
     $stmt->execute();
@@ -357,22 +357,51 @@ function activateInitialSubscriptionPayment(mysqli $conn, string $reference, arr
         throw new Exception('Payment reference was not found.', 404);
     }
 
-    $status = strtolower((string) ($gatewayData['status'] ?? ''));
-    $amount = subscriptionGatewayAmountKobo($gatewayData);
-    $currency = subscriptionGatewayCurrency($gatewayData);
-    if ($status !== 'success') {
-        throw new Exception('Payment has not been completed successfully.', 402);
-    }
-    if ($amount !== (int) $payment['amount_kobo'] || $currency !== strtoupper((string) $payment['currency'])) {
-        throw new Exception('Payment verification did not match the selected subscription plan.', 409);
+    subscriptionAssertConfirmedPayment($payment, $gatewayData);
+    // Protect against a provider response for another transaction reference.
+    if (subscriptionGatewayReference($gatewayData) !== $reference) {
+        throw new Exception('Paystack returned a different payment reference.', 409);
     }
 
+    // The payment row is locked by SELECT ... FOR UPDATE above. A webhook and a
+    // browser verify racing to confirm the same reference cannot extend twice.
     $activatedNow = false;
-    if ($payment['payment_status'] !== 'paid') {
+    if (!subscriptionPaymentIsSettled($payment)) {
+        if (subscriptionLateClosureReason($payment['closed_reason'] ?? null)) {
+            // This is a late real charge on a cancelled/superseded checkout.
+            // Lock the other active subscription before choosing a disposition.
+            $activeOther = subscriptionReviewActive($conn, (int) $payment['organization_id'], (int) $payment['subscription_id'], true);
+            if (subscriptionLatePaymentDecision($payment['closed_reason'], (bool) $activeOther) === 'needs_review') {
+                subscriptionRequireReviewSchema($conn); // Never silently activate without review storage.
+                $paidAt = subscriptionGatewayPaidAt($gatewayData);
+                $gatewayResponse = subscriptionGatewayJson($gatewayData);
+                $review = $conn->prepare("UPDATE subscription_payments SET status = 'paid', paid_at = ?, provider_response = ?, closed_reason = 'paid_after_close', failure_reason = NULL, review_status = 'needs_review', review_note = NULL, reviewed_by_user_id = NULL, reviewed_at = NULL, updated_at = NOW() WHERE id = ? AND status <> 'paid'");
+                $review->bind_param('ssi', $paidAt, $gatewayResponse, $payment['payment_id']);
+                $review->execute();
+                $review->close();
+                // No change to the closed subscription or the organisation's active access.
+                auditLog($conn, null, 'subscription.duplicate_payment_detected',
+                    'Late successful payment recorded without activating a second subscription.',
+                    (int) $payment['organization_id'], json_encode([
+                        'late_payment_id' => (int) $payment['payment_id'], 'late_reference' => $reference,
+                        'active_subscription_id' => (int) $activeOther['id'],
+                        'active_reference' => (string) ($activeOther['provider_reference'] ?? ''),
+                        'paid_at' => $paidAt, 'amount_kobo' => (int) $payment['amount_kobo'],
+                        'currency' => (string) $payment['currency'],
+                    ], JSON_UNESCAPED_SLASHES));
+                return ['organization_id' => (int) $payment['organization_id'],
+                    'subscription_id' => (int) $payment['subscription_id'], 'payment_id' => (int) $payment['payment_id'],
+                    'activated_now' => false, 'review_needed' => true, 'checkout_action' => 'review',
+                    'payment_reference' => $reference, 'period_end' => null];
+            }
+        }
         $paidAt = subscriptionGatewayPaidAt($gatewayData);
         $periodEnd = subscriptionNextPeriodEnd((string) $payment['billing_interval'], $payment['current_period_end'] ?? null, $paidAt);
         $gatewayResponse = subscriptionGatewayJson($gatewayData);
-        $paid = $conn->prepare("UPDATE subscription_payments SET status = 'paid', paid_at = ?, provider_response = ?, updated_at = NOW() WHERE id = ?");
+        $paidSql = subscriptionCheckoutClosureColumnReady($conn)
+            ? "UPDATE subscription_payments SET status = 'paid', closed_reason = 'paid', failure_reason = NULL, paid_at = ?, provider_response = ?, updated_at = NOW() WHERE id = ?"
+            : "UPDATE subscription_payments SET status = 'paid', paid_at = ?, provider_response = ?, updated_at = NOW() WHERE id = ?";
+        $paid = $conn->prepare($paidSql);
         $paid->bind_param('ssi', $paidAt, $gatewayResponse, $payment['payment_id']);
         $paid->execute();
         $paid->close();
@@ -440,20 +469,35 @@ function reconcileSuccessfulGatewaySubscriptionPayment(mysqli $conn, array $gate
     }
 
     $known = subscriptionFindByPaymentReference($conn, $reference);
-    if ($known && ($known['payment_status'] ?? '') !== 'paid') {
+    if ($known) {
+        // Never use an already-paid checkout as a recurring renewal: Paystack
+        // may deliver charge.success more than once or after browser verify.
+        if (subscriptionPaymentIsSettled($known)) {
+            return ['processed' => false, 'reason' => 'already_paid', 'payment_reference' => $reference];
+        }
+        subscriptionAssertConfirmedPayment(
+            ['amount_kobo' => $known['payment_amount_kobo'], 'currency' => $known['payment_currency']],
+            $gatewayData
+        );
         $activation = activateInitialSubscriptionPayment($conn, $reference, $gatewayData);
-        return ['processed' => true, 'subscription_id' => (int) $activation['subscription_id'], 'organization_id' => (int) $activation['organization_id'], 'activated_now' => !empty($activation['activated_now']), 'renewed_now' => false, 'payment_reference' => $reference, 'source' => 'pending_payment'];
+        return ['processed' => !empty($activation['activated_now']) || !empty($activation['review_needed']), 'subscription_id' => (int) $activation['subscription_id'], 'payment_id' => (int) ($activation['payment_id'] ?? 0), 'review_needed' => !empty($activation['review_needed']), 'organization_id' => (int) $activation['organization_id'], 'activated_now' => !empty($activation['activated_now']), 'renewed_now' => false, 'payment_reference' => $reference, 'source' => 'pending_payment'];
     }
 
-    $subscription = $known ?: subscriptionFindByGatewayData($conn, $gatewayData);
+    $subscription = subscriptionFindByGatewayData($conn, $gatewayData);
     if (!$subscription) {
         return ['processed' => false, 'reason' => 'subscription_not_found', 'payment_reference' => $reference];
     }
 
+    // Unknown references can represent a recurring Paystack charge, but only
+    // with explicit success and an exact plan amount/currency match.
+    subscriptionAssertConfirmedPayment(
+        ['amount_kobo' => $subscription['plan_amount_kobo'], 'currency' => $subscription['plan_currency']],
+        $gatewayData
+    );
     $subscriptionId = (int) $subscription['id'];
     $organizationId = (int) $subscription['organization_id'];
     $planId = (int) $subscription['plan_id'];
-    $amountKobo = subscriptionGatewayAmountKobo($gatewayData) ?: (int) ($subscription['plan_amount_kobo'] ?? 0);
+    $amountKobo = subscriptionGatewayAmountKobo($gatewayData);
     $currency = subscriptionGatewayCurrency($gatewayData) ?: (string) ($subscription['plan_currency'] ?? 'NGN');
     $paidAt = subscriptionGatewayPaidAt($gatewayData);
     $providerResponse = subscriptionGatewayJson($gatewayData);
@@ -522,7 +566,12 @@ function reconcileFailedGatewaySubscriptionPayment(mysqli $conn, array $gatewayD
         $reference = 'DI-FAILED-SUB-' . date('YmdHis') . '-' . strtoupper(bin2hex(random_bytes(4)));
     }
 
-    $subscription = subscriptionFindByPaymentReference($conn, $reference) ?: subscriptionFindByGatewayData($conn, $gatewayData);
+    $knownCheckout = subscriptionFindByPaymentReference($conn, $reference);
+    // A delayed failure/abandonment webhook must never downgrade a paid checkout.
+    if ($knownCheckout && subscriptionPaymentIsSettled($knownCheckout)) {
+        return ['processed' => false, 'reason' => 'already_paid', 'payment_reference' => $reference];
+    }
+    $subscription = $knownCheckout ?: subscriptionFindByGatewayData($conn, $gatewayData);
     if (!$subscription) {
         return ['processed' => false, 'reason' => 'subscription_not_found', 'payment_reference' => $reference];
     }
@@ -540,7 +589,10 @@ function reconcileFailedGatewaySubscriptionPayment(mysqli $conn, array $gatewayD
     $existingPayment = subscriptionQueryOne($conn, 'SELECT id FROM subscription_payments WHERE payment_reference = ? LIMIT 1', 's', [$reference]);
     if ($existingPayment) {
         $paymentId = (int) $existingPayment['id'];
-        $stmt = $conn->prepare("UPDATE subscription_payments SET subscription_id = ?, organization_id = ?, plan_id = ?, provider = ?, amount_kobo = ?, currency = ?, status = 'failed', provider_response = ?, updated_at = NOW() WHERE id = ? AND status <> 'paid'");
+        $failureSql = subscriptionCheckoutClosureColumnReady($conn)
+            ? "UPDATE subscription_payments SET subscription_id = ?, organization_id = ?, plan_id = ?, provider = ?, amount_kobo = ?, currency = ?, status = 'failed', closed_reason = 'failed', failure_reason = 'Provider failure webhook', provider_response = ?, updated_at = NOW() WHERE id = ? AND status <> 'paid'"
+            : "UPDATE subscription_payments SET subscription_id = ?, organization_id = ?, plan_id = ?, provider = ?, amount_kobo = ?, currency = ?, status = 'failed', provider_response = ?, updated_at = NOW() WHERE id = ? AND status <> 'paid'";
+        $stmt = $conn->prepare($failureSql);
         $stmt->bind_param('iiisissi', $subscriptionId, $organizationId, $planId, $provider, $amountKobo, $currency, $providerResponse, $paymentId);
         $stmt->execute();
         $stmt->close();
@@ -552,7 +604,11 @@ function reconcileFailedGatewaySubscriptionPayment(mysqli $conn, array $gatewayD
         $stmt->close();
     }
 
-    $stmt = $conn->prepare("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = ? AND status NOT IN ('cancelled','expired')");
+    // An initial pending checkout failed: cancel only that pending subscription.
+    // Unmatched recurring payment failures retain the original past-due handling.
+    $stmt = $knownCheckout
+        ? $conn->prepare("UPDATE subscriptions SET status = 'cancelled', cancelled_at = COALESCE(cancelled_at, NOW()), updated_at = NOW() WHERE id = ? AND status = 'pending'")
+        : $conn->prepare("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = ? AND status NOT IN ('cancelled','expired')");
     $stmt->bind_param('i', $subscriptionId);
     $stmt->execute();
     $stmt->close();
@@ -650,6 +706,7 @@ function processPaystackSubscriptionWebhookEvent(mysqli $conn, string $eventType
         'activations' => [],
         'renewals' => [],
         'failures' => [],
+        'reviews' => [],
         'provider_updates' => [],
         'skipped' => [],
     ];
@@ -657,7 +714,9 @@ function processPaystackSubscriptionWebhookEvent(mysqli $conn, string $eventType
     if ($eventType === 'charge.success') {
         $result = reconcileSuccessfulGatewaySubscriptionPayment($conn, $data, 'webhook.charge.success');
         if (!empty($result['processed'])) {
-            if (!empty($result['activated_now'])) {
+            if (!empty($result['review_needed'])) {
+                $results['reviews'][] = $result;
+            } elseif (!empty($result['activated_now'])) {
                 $results['activations'][] = $result;
             } elseif (!empty($result['renewed_now'])) {
                 $results['renewals'][] = $result;
