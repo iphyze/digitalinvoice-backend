@@ -37,3 +37,10 @@ Two independent causes, both reproduced against the real code and fixed:
 - Reduced stored integration logs to request digest and aggregate validation counts rather than full invoice/customer payloads.
 - Recorded blockers for alphanumeric-only IRNs, B2G/G2B workflow, missing frozen classifications, PARTIAL payment updates, JAdES/HSM certificate lifecycle and licensed production queue.
 - Offline regression tests: see `docs/NRS-PHASE5-INTEGRATION.md`. No database migration, invoice totals, approval rules or payment arithmetic changed.
+
+## 2026-11-13 — Subscription payment verification: diagnosis and recovery tooling
+
+- **Investigation (production `POST /subscriptions/verify` returned 500 after a successful Paystack payment):** the verification flow was replayed end to end against the supplied database with a Paystack-shaped success response (ISO `paid_at`, customer, metadata) and passes under MariaDB defaults and MySQL 8 strict mode (`ONLY_FULL_GROUP_BY`, `STRICT_TRANS_TABLES`, ...), for new subscriptions and renewals, and with each recent migration's tables/columns absent. The cause is therefore specific to production (real Paystack payload, data or server setup) and must be read from the server.
+- **`routes/subscriptions/verify.php`:** unexpected failures now log `Verify Subscription Error [ID] reference=... <ExceptionClass>: <message> @ file:line` and return the same error ID to the user (`error_id` in the JSON), so a customer report can be matched to the exact log line.
+- **New `scripts/verify-subscription-payment.php <reference> [--dry-run] [--replay=file.json]`:** runs the same verification from the server (real Paystack call), prints each step and the full exception (class, message, file:line, trace) on failure, and activates the paid subscription when it succeeds (`--dry-run` rolls back).
+- **Note:** the supplied (local) database is missing `migrations/20261113_platform_mfa_recovery.sql` (`users.mfa_reenroll_required_at`); without it every authenticated request fails with "session invalid". Apply it on every environment.

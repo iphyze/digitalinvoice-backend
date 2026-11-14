@@ -8,6 +8,7 @@ require_once __DIR__ . '/../../includes/subscriptionService.php';
 require_once __DIR__ . '/../../utils/mailer.php';
 require_once __DIR__ . '/../../utils/emailTemplates.php';
 
+$reference = null;
 try {
     $user = authenticateUser();
     $data = readJsonBody();
@@ -68,8 +69,19 @@ try {
 } catch (Throwable $e) {
     $code = (int) $e->getCode();
     if ($code < 400 || $code > 599) {
-        error_log('Verify Subscription Error: ' . $e->getMessage());
-        $code = 500;
+        // Log enough to find the cause, under an ID the user can quote (their payment
+        // already succeeded at Paystack, so this must be easy to trace and recover).
+        $errorId = strtoupper(bin2hex(random_bytes(4)));
+        error_log(sprintf(
+            'Verify Subscription Error [%s] reference=%s %s: %s @ %s:%d',
+            $errorId,
+            $reference ?? '-',
+            get_class($e),
+            $e->getMessage(),
+            $e->getFile(),
+            $e->getLine()
+        ));
+        jsonError('Unable to verify subscription payment. If you were charged, contact support with error ID ' . $errorId . '.', 500, ['error_id' => $errorId]);
     }
-    jsonError($code === 500 ? 'Unable to verify subscription payment.' : $e->getMessage(), $code);
+    jsonError($e->getMessage(), $code);
 }
